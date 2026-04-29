@@ -8,6 +8,8 @@ const titleElement = document.querySelector("#capture-title");
 const sourceTitleElement = document.querySelector("#source-title");
 const sizeElement = document.querySelector("#capture-size");
 const askaiUrlInput = document.querySelector("#askai-url");
+const MAX_CANVAS_DIMENSION = 32767;
+const MAX_OUTPUT_PIXELS = 80_000_000;
 
 let payload = null;
 
@@ -49,7 +51,7 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-async function drawCapture() {
+async function drawSingleCapture() {
   const image = await loadImage(payload.dataUrl);
   const crop = payload.crop || {
     height: image.naturalHeight,
@@ -73,6 +75,58 @@ async function drawCapture() {
   sizeElement.textContent = `${canvas.width} x ${canvas.height}`;
   askaiUrlInput.value = payload.askaiUrl || "http://localhost:3001/";
   setStatus(payload.note || "복사하거나 PNG로 저장할 수 있어요.");
+}
+
+async function drawFullPageCapture() {
+  const fullPage = payload.fullPage;
+  const dpr = fullPage.dpr || payload.frames[0]?.dpr || 1;
+  const pixelWidth = Math.max(1, Math.round(fullPage.width * dpr));
+  const pixelHeight = Math.max(1, Math.round(fullPage.height * dpr));
+  const renderScale = Math.min(
+    1,
+    MAX_CANVAS_DIMENSION / pixelWidth,
+    MAX_CANVAS_DIMENSION / pixelHeight,
+    Math.sqrt(MAX_OUTPUT_PIXELS / (pixelWidth * pixelHeight))
+  );
+
+  canvas.width = Math.max(1, Math.round(pixelWidth * renderScale));
+  canvas.height = Math.max(1, Math.round(pixelHeight * renderScale));
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  titleElement.textContent = payload.title || "전체 페이지 캡처";
+  sourceTitleElement.textContent = payload.sourceTitle || "현재 탭";
+  sizeElement.textContent =
+    renderScale < 1
+      ? `${canvas.width} x ${canvas.height} (${Math.round(renderScale * 100)}%)`
+      : `${canvas.width} x ${canvas.height}`;
+  askaiUrlInput.value = payload.askaiUrl || "http://localhost:3001/";
+
+  for (let index = 0; index < payload.frames.length; index += 1) {
+    const frame = payload.frames[index];
+    setStatus(`전체 페이지 조합 중 ${index + 1} / ${payload.frames.length}`);
+    const image = await loadImage(frame.dataUrl);
+    const frameDpr = frame.dpr || dpr;
+    const dprRatio = dpr / frameDpr;
+    const destX = Math.round(frame.x * dpr * renderScale);
+    const destY = Math.round(frame.y * dpr * renderScale);
+    const destWidth = Math.round(image.naturalWidth * dprRatio * renderScale);
+    const destHeight = Math.round(image.naturalHeight * dprRatio * renderScale);
+
+    ctx.drawImage(image, 0, 0, image.naturalWidth, image.naturalHeight, destX, destY, destWidth, destHeight);
+  }
+
+  const scaleNote = renderScale < 1 ? ` 큰 페이지라 ${Math.round(renderScale * 100)}% 크기로 조합했어요.` : "";
+  setStatus(`${payload.note || "전체 페이지 캡처가 준비되었습니다."}${scaleNote}`);
+}
+
+async function drawCapture() {
+  if (payload.frames && payload.fullPage) {
+    await drawFullPageCapture();
+    return;
+  }
+
+  await drawSingleCapture();
 }
 
 async function readPayload() {

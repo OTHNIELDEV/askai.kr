@@ -4,8 +4,11 @@ const extensionApi = isFirefoxPromiseApi ? browser : chrome;
 const menuApi = extensionApi.menus || extensionApi.contextMenus;
 const DEFAULT_ASKAI_URL = "http://localhost:3001/";
 const CAPTURE_KEY_PREFIX = "askai-capture-";
+const CAPTURE_INTERVAL_MS = 620;
+const MAX_FULL_PAGE_TILES = 90;
 
 const MENU_IDS = {
+  fullPage: "askai-capture-full-page",
   parent: "askai-root",
   visible: "askai-capture-visible",
   selection: "askai-capture-selection",
@@ -47,6 +50,12 @@ function createContextMenus() {
       });
       menuApi.create({
         contexts: ["all"],
+        id: MENU_IDS.fullPage,
+        parentId: MENU_IDS.parent,
+        title: "전체 페이지 캡처"
+      });
+      menuApi.create({
+        contexts: ["all"],
         id: MENU_IDS.visible,
         parentId: MENU_IDS.parent,
         title: "보이는 화면 캡처"
@@ -68,6 +77,10 @@ function createContextMenus() {
 
 function getActiveTab() {
   return callApi(extensionApi.tabs, "query", { active: true, currentWindow: true }).then((tabs) => tabs && tabs[0]);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function getAskaiUrl() {
@@ -114,12 +127,120 @@ async function captureVisibleTab(tab, options = {}) {
   });
 }
 
+async function ensureContentScript(tab) {
+  await callApi(extensionApi.scripting, "executeScript", {
+    files: ["content/selector.js"],
+    target: { tabId: tab.id }
+  });
+}
+
+function buildCapturePositions(maxScroll, viewportSize) {
+  if (maxScroll <= 0 || viewportSize <= 0) return [0];
+
+  const positions = [];
+  for (let position = 0; position < maxScroll; position += viewportSize) {
+    positions.push(Math.round(position));
+  }
+
+  const last = Math.round(maxScroll);
+  if (positions[positions.length - 1] !== last) {
+    positions.push(last);
+  }
+
+  return positions;
+}
+
+async function captureFullPage(tab) {
+  try {
+    await ensureContentScript(tab);
+  } catch (error) {
+    await captureVisibleTab(tab, {
+      note: "이 페이지에서는 전체 페이지 스크립트를 삽입할 수 없어 보이는 화면으로 캡처했어요.",
+      title: "보이는 화면 캡처"
+    });
+    return;
+  }
+
+  const frames = [];
+  let captureError = null;
+  let metrics = null;
+
+  try {
+    metrics = await callApi(extensionApi.tabs, "sendMessage", tab.id, { type: "ASKAI_FULL_PAGE_PREPARE" });
+    if (!metrics || !metrics.ok) throw new Error(metrics?.error || "페이지 크기를 읽지 못했어요.");
+
+    const xPositions = buildCapturePositions(metrics.maxScrollX, metrics.viewportWidth);
+    const yPositions = buildCapturePositions(metrics.maxScrollY, metrics.viewportHeight);
+    const total = xPositions.length * yPositions.length;
+
+    if (total > MAX_FULL_PAGE_TILES) {
+      throw new Error(`페이지가 너무 커서 ${total}장으로 나뉩니다. 먼저 영역 선택 캡처를 사용해줘요.`);
+    }
+
+    let index = 0;
+    for (const y of yPositions) {
+      for (const x of xPositions) {
+        index += 1;
+        const frameMetrics = await callApi(extensionApi.tabs, "sendMessage", tab.id, {
+          index,
+          total,
+          type: "ASKAI_FULL_PAGE_SCROLL",
+          x,
+          y
+        });
+        await delay(CAPTURE_INTERVAL_MS);
+        const dataUrl = await callApi(extensionApi.tabs, "captureVisibleTab", tab.windowId, { format: "png" });
+
+        frames.push({
+          dataUrl,
+          dpr: frameMetrics.dpr || metrics.dpr || 1,
+          height: frameMetrics.viewportHeight || metrics.viewportHeight,
+          width: frameMetrics.viewportWidth || metrics.viewportWidth,
+          x: frameMetrics.scrollX || 0,
+          y: frameMetrics.scrollY || 0
+        });
+      }
+    }
+  } catch (error) {
+    captureError = error;
+  } finally {
+    await callApi(extensionApi.tabs, "sendMessage", tab.id, { type: "ASKAI_FULL_PAGE_FINISH" }).catch(() => undefined);
+  }
+
+  if (captureError) {
+    const message = captureError.message || "캡처 중 문제가 발생했습니다.";
+    await captureVisibleTab(tab, {
+      note: `전체 페이지 캡처 대신 보이는 화면만 캡처했어요. ${message}`,
+      title: "보이는 화면 캡처"
+    });
+    return;
+  }
+
+  if (frames.length === 0 || !metrics) {
+    throw new Error("전체 페이지 캡처를 만들지 못했어요.");
+  }
+
+  await openViewer({
+    askaiUrl: await getAskaiUrl(),
+    capturedAt: new Date().toISOString(),
+    frames,
+    fullPage: {
+      dpr: metrics.dpr || frames[0].dpr || 1,
+      height: metrics.fullHeight,
+      tileCount: frames.length,
+      width: metrics.fullWidth
+    },
+    note: `${frames.length}장의 화면을 이어붙였어요.`,
+    sourceTitle: tab.title || "현재 탭",
+    sourceUrl: tab.url || "",
+    title: "전체 페이지 캡처",
+    version: 2
+  });
+}
+
 async function beginSelection(tab) {
   try {
-    await callApi(extensionApi.scripting, "executeScript", {
-      files: ["content/selector.js"],
-      target: { tabId: tab.id }
-    });
+    await ensureContentScript(tab);
     await callApi(extensionApi.tabs, "sendMessage", tab.id, { type: "ASKAI_START_SELECTION" });
   } catch (error) {
     await captureVisibleTab(tab, {
@@ -132,6 +253,11 @@ async function beginSelection(tab) {
 async function handleCommand(command, tabFromEvent) {
   const tab = tabFromEvent && tabFromEvent.id ? tabFromEvent : await getActiveTab();
   if (!tab || !tab.id) return { ok: false, error: "현재 탭을 찾을 수 없어요." };
+
+  if (command === MENU_IDS.fullPage || command === "capture-full-page") {
+    await captureFullPage(tab);
+    return { ok: true };
+  }
 
   if (command === MENU_IDS.visible || command === "capture-visible") {
     await captureVisibleTab(tab);

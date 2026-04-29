@@ -4,7 +4,15 @@
   "short_name": "ASKAI",
   "version": "0.1.0",
   "description": "마우스 오른쪽 클릭으로 현재 탭을 캡처하고 ASKAI에 복사하거나 저장합니다.",
-  "permissions": ["activeTab", "clipboardWrite", "contextMenus", "downloads", "scripting", "storage"],
+  "permissions": [
+    "activeTab",
+    "clipboardWrite",
+    "contextMenus",
+    "downloads",
+    "scripting",
+    "storage",
+    "unlimitedStorage"
+  ],
   "background": {
     "service_worker": "background.js"
   },

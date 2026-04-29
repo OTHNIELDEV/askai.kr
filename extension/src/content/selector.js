@@ -3,6 +3,8 @@
   window.__ASKAI_SELECTOR_READY__ = true;
 
   const extensionApi = typeof browser !== "undefined" && browser.runtime ? browser : chrome;
+  let fullPageOverlayHost = null;
+  let originalScroll = null;
   let overlayHost = null;
   let startPoint = null;
   let currentBox = null;
@@ -30,6 +32,181 @@
     if (result && typeof result.catch === "function") {
       result.catch(() => undefined);
     }
+  }
+
+  function waitForPageSettle() {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          window.setTimeout(resolve, 160);
+        });
+      });
+    });
+  }
+
+  function getPageMetrics() {
+    const root = document.documentElement;
+    const body = document.body;
+    const scrollingElement = document.scrollingElement || root;
+    const fullWidth = Math.max(
+      root.clientWidth,
+      root.offsetWidth,
+      root.scrollWidth,
+      body?.clientWidth || 0,
+      body?.offsetWidth || 0,
+      body?.scrollWidth || 0,
+      window.innerWidth
+    );
+    const fullHeight = Math.max(
+      root.clientHeight,
+      root.offsetHeight,
+      root.scrollHeight,
+      body?.clientHeight || 0,
+      body?.offsetHeight || 0,
+      body?.scrollHeight || 0,
+      window.innerHeight
+    );
+
+    return {
+      dpr: window.devicePixelRatio || 1,
+      fullHeight,
+      fullWidth,
+      maxScrollX: Math.max(0, fullWidth - window.innerWidth),
+      maxScrollY: Math.max(0, fullHeight - window.innerHeight),
+      ok: true,
+      scrollX: window.scrollX || scrollingElement.scrollLeft || 0,
+      scrollY: window.scrollY || scrollingElement.scrollTop || 0,
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth
+    };
+  }
+
+  function cleanupFullPageOverlay() {
+    if (fullPageOverlayHost) {
+      fullPageOverlayHost.remove();
+      fullPageOverlayHost = null;
+    }
+  }
+
+  function createFullPageOverlay() {
+    cleanupFullPageOverlay();
+
+    fullPageOverlayHost = document.createElement("div");
+    fullPageOverlayHost.id = "askai-full-page-host";
+    fullPageOverlayHost.style.position = "fixed";
+    fullPageOverlayHost.style.inset = "0";
+    fullPageOverlayHost.style.pointerEvents = "none";
+    fullPageOverlayHost.style.zIndex = "2147483647";
+    document.documentElement.appendChild(fullPageOverlayHost);
+
+    const root = fullPageOverlayHost.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+        }
+
+        .badge {
+          align-items: center;
+          background: rgba(17, 19, 24, 0.92);
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          border-radius: 8px;
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+          color: #fffef7;
+          display: grid;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          gap: 6px;
+          left: 50%;
+          min-width: 260px;
+          padding: 14px 16px;
+          position: fixed;
+          text-align: center;
+          top: 22px;
+          transform: translateX(-50%);
+        }
+
+        strong {
+          font-size: 15px;
+          font-weight: 850;
+        }
+
+        span {
+          color: rgba(255, 254, 247, 0.68);
+          font-size: 12px;
+          font-weight: 750;
+        }
+
+        .bar {
+          background: rgba(255, 255, 255, 0.16);
+          border-radius: 999px;
+          height: 6px;
+          overflow: hidden;
+        }
+
+        .fill {
+          background: #2f7df6;
+          height: 100%;
+          transition: width 180ms ease;
+          width: 0%;
+        }
+      </style>
+      <div class="badge">
+        <strong>ASKAI 전체 페이지 캡처 중</strong>
+        <span class="step">준비 중</span>
+        <div class="bar"><div class="fill"></div></div>
+      </div>
+    `;
+  }
+
+  function updateFullPageOverlay(index, total) {
+    if (!fullPageOverlayHost) return;
+
+    fullPageOverlayHost.style.opacity = "1";
+    const root = fullPageOverlayHost.shadowRoot;
+    const step = root.querySelector(".step");
+    const fill = root.querySelector(".fill");
+    const percent = total > 0 ? Math.round((index / total) * 100) : 0;
+
+    step.textContent = `${index} / ${total} 화면 캡처`;
+    fill.style.width = `${percent}%`;
+  }
+
+  async function prepareFullPageCapture() {
+    cleanup();
+    originalScroll = { x: window.scrollX, y: window.scrollY };
+    createFullPageOverlay();
+    await waitForPageSettle();
+    return getPageMetrics();
+  }
+
+  async function scrollFullPageCapture(message) {
+    updateFullPageOverlay(message.index, message.total);
+    window.scrollTo(message.x, message.y);
+    await waitForPageSettle();
+    const metrics = getPageMetrics();
+    if (fullPageOverlayHost) {
+      fullPageOverlayHost.style.opacity = "0";
+    }
+    await waitForPageSettle();
+
+    return {
+      dpr: metrics.dpr,
+      ok: true,
+      scrollX: metrics.scrollX,
+      scrollY: metrics.scrollY,
+      viewportHeight: metrics.viewportHeight,
+      viewportWidth: metrics.viewportWidth
+    };
+  }
+
+  async function finishFullPageCapture() {
+    if (originalScroll) {
+      window.scrollTo(originalScroll.x, originalScroll.y);
+    }
+    cleanupFullPageOverlay();
+    originalScroll = null;
+    await waitForPageSettle();
+    return { ok: true };
   }
 
   function cleanup() {
@@ -208,10 +385,31 @@
   }
 
   extensionApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message.type === "ASKAI_START_SELECTION") {
-      startSelection();
-      if (sendResponse) sendResponse({ ok: true });
-    }
+    const work = async () => {
+      if (message.type === "ASKAI_START_SELECTION") {
+        startSelection();
+        return { ok: true };
+      }
+
+      if (message.type === "ASKAI_FULL_PAGE_PREPARE") {
+        return prepareFullPageCapture();
+      }
+
+      if (message.type === "ASKAI_FULL_PAGE_SCROLL") {
+        return scrollFullPageCapture(message);
+      }
+
+      if (message.type === "ASKAI_FULL_PAGE_FINISH") {
+        return finishFullPageCapture();
+      }
+
+      return { ok: false, error: "ASKAI 메시지를 처리하지 못했어요." };
+    };
+
+    work()
+      .then((response) => sendResponse(response))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+
     return true;
   });
 })();
