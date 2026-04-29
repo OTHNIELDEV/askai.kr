@@ -3,13 +3,16 @@
 import {
   ArrowDownToLine,
   ArrowUpRight,
+  Camera,
   Circle,
   Clipboard,
   ClipboardCheck,
+  Crop,
   Eraser,
   Highlighter,
   ImagePlus,
   Minus,
+  Monitor,
   Move,
   MousePointer2,
   PenLine,
@@ -19,9 +22,10 @@ import {
   Sparkles,
   Trash2,
   Type,
-  Undo2
+  Undo2,
+  X
 } from "lucide-react";
-import { PointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MouseEvent as ReactMouseEvent, PointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 780;
@@ -44,6 +48,26 @@ type DrawAction = {
   color: string;
   width: number;
   label?: string;
+};
+
+type CapturePreview = {
+  blob: Blob;
+  meta: string;
+  title: string;
+  url: string;
+};
+
+type AreaCaptureState = {
+  active: boolean;
+  current: Point | null;
+  start: Point | null;
+};
+
+type ViewportRect = {
+  height: number;
+  left: number;
+  top: number;
+  width: number;
 };
 
 type ClipboardItemConstructor = typeof ClipboardItem;
@@ -265,9 +289,19 @@ function makeId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function getViewportSelectionRect(start: Point, current: Point): ViewportRect {
+  return {
+    height: Math.abs(current.y - start.y),
+    left: Math.min(start.x, current.x),
+    top: Math.min(start.y, current.y),
+    width: Math.abs(current.x - start.x)
+  };
+}
+
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
   const [activeTool, setActiveTool] = useState<Tool>("pen");
   const [color, setColor] = useState("#ff4d4d");
   const [strokeWidth, setStrokeWidth] = useState(5);
@@ -284,12 +318,23 @@ export default function Home() {
   const [status, setStatus] = useState("대기 중");
   const [hasCopied, setHasCopied] = useState(false);
   const [snapshots, setSnapshots] = useState<string[]>([]);
+  const [contextMenu, setContextMenu] = useState<Point | null>(null);
+  const [areaCapture, setAreaCapture] = useState<AreaCaptureState>({
+    active: false,
+    current: null,
+    start: null
+  });
+  const [capturePreview, setCapturePreview] = useState<CapturePreview | null>(null);
 
   const selectedTool = useMemo(() => tools.find((tool) => tool.id === activeTool), [activeTool]);
   const selectedTextAction = useMemo(
     () => actions.find((action) => action.id === selectedTextId && action.tool === "text"),
     [actions, selectedTextId]
   );
+  const areaSelectionRect = useMemo(() => {
+    if (!areaCapture.start || !areaCapture.current) return null;
+    return getViewportSelectionRect(areaCapture.start, areaCapture.current);
+  }, [areaCapture.current, areaCapture.start]);
 
   const renderCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -356,6 +401,60 @@ export default function Home() {
     }
   }, [selectedTextAction, selectedTextId]);
 
+  const closeCapturePreview = useCallback(() => {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
+    }
+    setCapturePreview(null);
+  }, []);
+
+  const openCapturePreview = useCallback((blob: Blob, title: string, meta: string) => {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+    }
+
+    const url = URL.createObjectURL(blob);
+    previewUrlRef.current = url;
+    setCapturePreview({ blob, meta, title, url });
+    setStatus(`${title} 준비됨`);
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+
+      setContextMenu(null);
+      setAreaCapture({ active: false, current: null, start: null });
+      if (capturePreview) {
+        closeCapturePreview();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [capturePreview, closeCapturePreview]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const closeMenu = () => setContextMenu(null);
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("resize", closeMenu);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("resize", closeMenu);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+      }
+    };
+  }, []);
+
   const setImageFromFile = useCallback((file: File) => {
     if (!file.type.startsWith("image/")) return;
 
@@ -370,6 +469,23 @@ export default function Home() {
       setImageScale(1);
       setImageOffset({ x: 0, y: 0 });
       setStatus("이미지 붙여넣음");
+      URL.revokeObjectURL(url);
+    };
+    image.src = url;
+  }, []);
+
+  const setImageFromBlob = useCallback((blob: Blob, nextStatus: string) => {
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      setBaseImage(image);
+      setActions([]);
+      setSelectedTextId(null);
+      setDraftAction(null);
+      setImageDrag(null);
+      setImageScale(1);
+      setImageOffset({ x: 0, y: 0 });
+      setStatus(nextStatus);
       URL.revokeObjectURL(url);
     };
     image.src = url;
@@ -442,6 +558,194 @@ export default function Home() {
     }
 
     setStrokeWidth(nextWidth);
+  };
+
+  const getCanvasBlob = useCallback(async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+
+    return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  }, []);
+
+  const addSnapshotFromBlob = useCallback((blob: Blob) => {
+    const previewUrl = URL.createObjectURL(blob);
+    setSnapshots((current) => {
+      current.slice(2).forEach((snapshot) => URL.revokeObjectURL(snapshot));
+      return [previewUrl, ...current.slice(0, 2)];
+    });
+  }, []);
+
+  const copyBlobToClipboard = useCallback(async (blob: Blob, successMessage: string) => {
+    try {
+      if (navigator.clipboard && window.ClipboardItem) {
+        await navigator.clipboard.write([new window.ClipboardItem({ "image/png": blob })]);
+        setHasCopied(true);
+        setStatus(successMessage);
+        window.setTimeout(() => setHasCopied(false), 1800);
+      } else {
+        setStatus("브라우저 클립보드 권한 필요");
+      }
+    } catch {
+      setStatus("복사 권한을 확인해줘");
+    }
+  }, []);
+
+  const downloadBlob = useCallback((blob: Blob, filePrefix: string) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.download = `${filePrefix}-${Date.now()}.png`;
+    link.href = url;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, []);
+
+  const captureCanvasRegion = useCallback(
+    async (selection: ViewportRect) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      const canvasRect = canvas.getBoundingClientRect();
+      const left = Math.max(selection.left, canvasRect.left);
+      const top = Math.max(selection.top, canvasRect.top);
+      const right = Math.min(selection.left + selection.width, canvasRect.right);
+      const bottom = Math.min(selection.top + selection.height, canvasRect.bottom);
+      const width = right - left;
+      const height = bottom - top;
+
+      if (width < 12 || height < 12) {
+        setStatus("캔버스 안쪽을 조금 더 크게 선택해줘");
+        return;
+      }
+
+      const sourceX = ((left - canvasRect.left) / canvasRect.width) * CANVAS_WIDTH;
+      const sourceY = ((top - canvasRect.top) / canvasRect.height) * CANVAS_HEIGHT;
+      const sourceWidth = (width / canvasRect.width) * CANVAS_WIDTH;
+      const sourceHeight = (height / canvasRect.height) * CANVAS_HEIGHT;
+      const outputCanvas = document.createElement("canvas");
+      outputCanvas.width = Math.round(sourceWidth);
+      outputCanvas.height = Math.round(sourceHeight);
+      const ctx = outputCanvas.getContext("2d");
+      if (!ctx) return;
+
+      ctx.drawImage(
+        canvas,
+        sourceX,
+        sourceY,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        outputCanvas.width,
+        outputCanvas.height
+      );
+
+      const blob = await new Promise<Blob | null>((resolve) => outputCanvas.toBlob(resolve, "image/png"));
+      if (blob) {
+        openCapturePreview(blob, "영역 선택 캡처", `${outputCanvas.width} x ${outputCanvas.height}`);
+      }
+    },
+    [openCapturePreview]
+  );
+
+  const captureWholeCanvas = useCallback(async () => {
+    setContextMenu(null);
+    const blob = await getCanvasBlob();
+    if (blob) {
+      openCapturePreview(blob, "캔버스 전체 캡처", `${CANVAS_WIDTH} x ${CANVAS_HEIGHT}`);
+    }
+  }, [getCanvasBlob, openCapturePreview]);
+
+  const beginAreaCapture = useCallback(() => {
+    setContextMenu(null);
+    setAreaCapture({ active: true, current: null, start: null });
+    setStatus("드래그해서 캔버스 영역 선택");
+  }, []);
+
+  const captureScreenFrame = useCallback(async () => {
+    setContextMenu(null);
+
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setStatus("이 브라우저는 화면 선택 캡처를 지원하지 않아");
+      return;
+    }
+
+    let stream: MediaStream | null = null;
+
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ audio: false, video: true });
+      const video = document.createElement("video");
+      video.muted = true;
+
+      await new Promise<void>((resolve) => {
+        video.onloadedmetadata = () => resolve();
+        video.srcObject = stream;
+      });
+      await video.play();
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+
+      const width = video.videoWidth || stream.getVideoTracks()[0]?.getSettings().width || CANVAS_WIDTH;
+      const height = video.videoHeight || stream.getVideoTracks()[0]?.getSettings().height || CANVAS_HEIGHT;
+      const outputCanvas = document.createElement("canvas");
+      outputCanvas.width = width;
+      outputCanvas.height = height;
+      const ctx = outputCanvas.getContext("2d");
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, width, height);
+      const blob = await new Promise<Blob | null>((resolve) => outputCanvas.toBlob(resolve, "image/png"));
+      if (blob) {
+        openCapturePreview(blob, "화면 선택 캡처", `${width} x ${height}`);
+      }
+    } catch {
+      setStatus("화면 캡처가 취소됨");
+    } finally {
+      stream?.getTracks().forEach((track) => track.stop());
+    }
+  }, [openCapturePreview]);
+
+  const openAskaiMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    const menuWidth = 260;
+    const menuHeight = 248;
+    setContextMenu({
+      x: Math.max(12, Math.min(event.clientX, window.innerWidth - menuWidth - 12)),
+      y: Math.max(12, Math.min(event.clientY, window.innerHeight - menuHeight - 12))
+    });
+  };
+
+  const handleAreaPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    const point = { x: event.clientX, y: event.clientY };
+    setAreaCapture({ active: true, current: point, start: point });
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleAreaPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!areaCapture.start) return;
+
+    setAreaCapture((current) => ({
+      ...current,
+      current: { x: event.clientX, y: event.clientY }
+    }));
+  };
+
+  const handleAreaPointerUp = async (event: PointerEvent<HTMLDivElement>) => {
+    const start = areaCapture.start;
+    const current = { x: event.clientX, y: event.clientY };
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    setAreaCapture({ active: false, current: null, start: null });
+    if (!start) return;
+
+    const selection = getViewportSelectionRect(start, current);
+    if (selection.width < 12 || selection.height < 12) {
+      setStatus("캡처 영역이 너무 작아");
+      return;
+    }
+
+    await captureCanvasRegion(selection);
   };
 
   const handlePointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -545,30 +849,32 @@ export default function Home() {
   };
 
   const copyCanvas = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    const blob = await getCanvasBlob();
     if (!blob) return;
 
-    const previewUrl = URL.createObjectURL(blob);
-    setSnapshots((current) => {
-      current.slice(2).forEach((snapshot) => URL.revokeObjectURL(snapshot));
-      return [previewUrl, ...current.slice(0, 2)];
-    });
+    addSnapshotFromBlob(blob);
+    await copyBlobToClipboard(blob, "PNG 클립보드 복사됨");
+  };
 
-    try {
-      if (navigator.clipboard && window.ClipboardItem) {
-        await navigator.clipboard.write([new window.ClipboardItem({ "image/png": blob })]);
-        setHasCopied(true);
-        setStatus("PNG 클립보드 복사됨");
-        window.setTimeout(() => setHasCopied(false), 1800);
-      } else {
-        setStatus("브라우저 클립보드 권한 필요");
-      }
-    } catch {
-      setStatus("복사 권한을 확인해줘");
-    }
+  const copyCapturePreview = async () => {
+    if (!capturePreview) return;
+
+    addSnapshotFromBlob(capturePreview.blob);
+    await copyBlobToClipboard(capturePreview.blob, "캡처 클립보드 복사됨");
+  };
+
+  const saveCapturePreview = () => {
+    if (!capturePreview) return;
+
+    downloadBlob(capturePreview.blob, "askai-capture");
+    setStatus("캡처 저장됨");
+  };
+
+  const placeCaptureOnCanvas = () => {
+    if (!capturePreview) return;
+
+    setImageFromBlob(capturePreview.blob, "캡처를 캔버스에 붙임");
+    closeCapturePreview();
   };
 
   const removeSnapshot = (snapshotUrl: string) => {
@@ -584,14 +890,11 @@ export default function Home() {
   };
 
   const downloadPng = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const link = document.createElement("a");
-    link.download = `askai-${Date.now()}.png`;
-    link.href = canvas.toDataURL("image/png");
-    link.click();
-    setStatus("PNG 저장됨");
+    void getCanvasBlob().then((blob) => {
+      if (!blob) return;
+      downloadBlob(blob, "askai");
+      setStatus("PNG 저장됨");
+    });
   };
 
   const loadDemo = () => {
@@ -649,7 +952,7 @@ export default function Home() {
   };
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" onContextMenu={openAskaiMenu}>
       <section className="topbar" aria-label="ASKAI top controls">
         <div className="brand-block">
           <div className="brand-mark">
@@ -973,6 +1276,122 @@ export default function Home() {
           </section>
         </aside>
       </section>
+
+      {contextMenu ? (
+        <div
+          aria-label="ASKAI screenshot menu"
+          className="askai-context-menu"
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          role="menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <div className="context-menu-brand">
+            <span>ASKAI</span>
+            <small>스크린샷</small>
+          </div>
+          <button onClick={captureWholeCanvas} role="menuitem" type="button">
+            <Camera size={17} />
+            <span>캔버스 전체 캡처</span>
+          </button>
+          <button onClick={beginAreaCapture} role="menuitem" type="button">
+            <Crop size={17} />
+            <span>영역 선택 캡처</span>
+          </button>
+          <button onClick={captureScreenFrame} role="menuitem" type="button">
+            <Monitor size={17} />
+            <span>화면 선택 캡처</span>
+          </button>
+          <div className="context-menu-note">캡처 후 바로 복사하거나 PNG로 저장할 수 있어요.</div>
+        </div>
+      ) : null}
+
+      {areaCapture.active ? (
+        <div
+          className="area-capture-layer"
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onPointerDown={handleAreaPointerDown}
+          onPointerMove={handleAreaPointerMove}
+          onPointerUp={handleAreaPointerUp}
+        >
+          <div className="area-capture-hint">
+            <Crop size={28} />
+            <strong>드래그해서 캔버스 영역을 선택하세요.</strong>
+            <span>ESC 키를 누르면 취소됩니다.</span>
+          </div>
+          {areaSelectionRect ? (
+            <div
+              className="area-capture-box"
+              style={{
+                height: areaSelectionRect.height,
+                left: areaSelectionRect.left,
+                top: areaSelectionRect.top,
+                width: areaSelectionRect.width
+              }}
+            />
+          ) : null}
+          <button
+            className="area-capture-cancel"
+            onClick={(event) => {
+              event.stopPropagation();
+              setAreaCapture({ active: false, current: null, start: null });
+              setStatus("영역 캡처 취소됨");
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            type="button"
+          >
+            취소
+          </button>
+        </div>
+      ) : null}
+
+      {capturePreview ? (
+        <div
+          className="capture-preview-backdrop"
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+        >
+          <section aria-label="ASKAI screenshot preview" aria-modal="true" className="capture-preview-dialog" role="dialog">
+            <header className="capture-preview-head">
+              <div>
+                <p>ASKAI 스크린샷</p>
+                <h2>{capturePreview.title}</h2>
+                <span>{capturePreview.meta}</span>
+              </div>
+              <button className="icon-button" onClick={closeCapturePreview} title="닫기" type="button">
+                <X size={18} />
+              </button>
+            </header>
+
+            <div className="capture-preview-frame">
+              <img alt="ASKAI screenshot preview" src={capturePreview.url} />
+            </div>
+
+            <div className="capture-preview-actions">
+              <button className="primary-button" onClick={copyCapturePreview} type="button">
+                <ClipboardCheck size={18} />
+                복사
+              </button>
+              <button className="ghost-button" onClick={saveCapturePreview} type="button">
+                <ArrowDownToLine size={18} />
+                저장
+              </button>
+              <button className="ghost-button" onClick={placeCaptureOnCanvas} type="button">
+                <ImagePlus size={18} />
+                캔버스에 붙이기
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
