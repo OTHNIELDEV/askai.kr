@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ASKAI 스크린샷</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="brand">
+        <div class="mark">✦</div>
+        <div>
+          <p>AI visual clipboard</p>
+          <h1>ASKAI <span>아스카이</span></h1>
+        </div>
+      </header>
+
+      <section class="actions" aria-label="스크린샷 작업">
+        <button class="primary" data-command="capture-selection" type="button">
+          <span>영역 선택 캡처</span>
+          <small>드래그해서 필요한 부분만</small>
+        </button>
+        <button data-command="capture-visible" type="button">
+          <span>보이는 화면 캡처</span>
+          <small>현재 탭의 화면 그대로</small>
+        </button>
+        <button data-command="open-app" type="button">
+          <span>ASKAI 열기</span>
+          <small>복사한 이미지를 붙여넣기</small>
+        </button>
+      </section>
+
+      <label class="app-url">
+        <span>ASKAI 주소</span>
+        <input id="askai-url" spellcheck="false" type="url" />
+      </label>
+
+      <p class="status" id="status">마우스 오른쪽 클릭 메뉴에서도 ASKAI를 사용할 수 있어요.</p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

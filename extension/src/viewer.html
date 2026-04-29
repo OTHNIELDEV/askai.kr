@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ASKAI 캡처</title>
+    <link rel="stylesheet" href="viewer.css" />
+  </head>
+  <body>
+    <main class="viewer-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="mark">✦</div>
+          <div>
+            <p>ASKAI screenshot</p>
+            <h1 id="capture-title">캡처 미리보기</h1>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="ghost" id="copy-open" type="button">복사 후 ASKAI 열기</button>
+          <button class="ghost" id="save" type="button">저장</button>
+          <button class="primary" id="copy" type="button">복사</button>
+        </div>
+      </header>
+
+      <section class="meta">
+        <div>
+          <span>출처</span>
+          <strong id="source-title">현재 탭</strong>
+        </div>
+        <div>
+          <span>크기</span>
+          <strong id="capture-size">-</strong>
+        </div>
+        <label>
+          <span>ASKAI 주소</span>
+          <input id="askai-url" spellcheck="false" type="url" />
+        </label>
+      </section>
+
+      <section class="preview" aria-label="캡처 미리보기">
+        <canvas id="capture-canvas"></canvas>
+      </section>
+
+      <footer>
+        <p id="status">캡처를 준비하고 있습니다.</p>
+      </footer>
+    </main>
+
+    <script src="viewer.js"></script>
+  </body>
+</html>
